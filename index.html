@@ -45,9 +45,6 @@
   .mini{padding:12px;font-size:22px;flex:0 0 64px;}
   label{display:block;color:var(--muted);font-size:13px;margin:2px 0 8px;}
   input[type=range]{width:100%;accent-color:var(--accent);height:34px;}
-  .meter{height:18px;border-radius:9px;background:var(--panel2);overflow:hidden;position:relative;margin-top:10px;border:1px solid var(--line);}
-  .meter .bar{height:100%;width:0%;background:linear-gradient(90deg,#3a6,#4f8cff);transition:width .05s linear;}
-  .meter .thr{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bad);}
   .stats{display:flex;gap:10px;}
   .stat{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:12px;text-align:center;}
   .stat .n{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;}
@@ -62,6 +59,8 @@
   .lockstat{margin-top:12px;text-align:center;font-size:13px;color:var(--muted);
     background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:9px;transition:.2s;}
   .lockstat.on{color:var(--good);border-color:var(--good);background:#13261f;}
+  .plot{width:100%;height:170px;display:block;border-radius:12px;background:#0f1426;border:1px solid var(--line);}
+  .angleNow{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800;font-size:15px;letter-spacing:0;text-transform:none;}
   .banner{background:#3a2030;border:1px solid var(--bad);color:#ffd9d9;border-radius:14px;padding:12px;font-size:13.5px;margin-bottom:14px;display:none;}
   .hide{display:none !important;}
   .secTitle{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:0 2px 10px;}
@@ -93,15 +92,14 @@
 
 <!-- SENSITIVITY -->
 <div class="card">
-  <div class="secTitle">Detection</div>
-  <label>Sensitivity — higher = counts smaller motions (raise if it misses reps, lower if it over-counts)</label>
-  <input id="sens" type="range" min="1" max="10" step="1" value="6" />
-  <div class="meter" id="meterWrap">
-    <div class="bar" id="bar"></div>
-    <div class="thr" id="thrLine"></div>
+  <div class="secTitle" style="display:flex;justify-content:space-between;align-items:center">
+    <span>Orientation angle</span><span id="angleNow" class="angleNow">0°</span>
   </div>
-  <p class="note" style="margin:10px 0 0">
-    Blue = current motion, red line = trigger level. Strap the phone to your upper arm or tuck it in your waistband, then tune so resting stays left of the line and each push-up spikes across it.
+  <canvas id="plot" class="plot"></canvas>
+  <label style="margin-top:12px">Sensitivity — higher counts smaller dips (raise if reps are missed, lower if over-counted)</label>
+  <input id="sens" type="range" min="1" max="10" step="1" value="6" />
+  <p class="note" style="margin:8px 0 0">
+    Live angle (degrees) between the phone's <b>starting</b> orientation and now. Strap it to your upper arm — each push-up should appear as one clear bump. Reps are computed from the wave's <b>periodicity</b> when you tap <b>Finish&nbsp;set</b>.
   </p>
 </div>
 
@@ -142,7 +140,7 @@
   // ---------- elements ----------
   const $ = id => document.getElementById(id);
   const countEl=$("count"), subEl=$("sub"), startBtn=$("startBtn"), stopBtn=$("stopBtn");
-  const sensEl=$("sens"), barEl=$("bar"), thrLine=$("thrLine"), meterWrap=$("meterWrap");
+  const sensEl=$("sens"), cv=$("plot"), ctx=cv.getContext("2d"), angleEl=$("angleNow");
   const liveDot=$("liveDot"), lockStatus=$("lockStatus");
 
   // ---------- state ----------
@@ -150,53 +148,131 @@
 
   if (prefs.sens) sensEl.value = prefs.sens;
 
-  // sensitivity 1..10 -> high threshold in m/s^2 (10 = most sensitive = low threshold)
-  function highThreshold(){
-    const s = +sensEl.value;            // 1..10
-    return 3.8 - (s-1)*(3.8-0.55)/9;    // ~3.8 down to ~0.55
-  }
-  function lowThreshold(){ return highThreshold()*0.45; }
+  const MIN_AMP = 8;  // degrees — minimum total swing to treat a set as real reps
+  // sensitivity 1..10 -> fraction of the wave's amplitude a bump must reach to count
+  function promFrac(){ const s=+sensEl.value; return 0.50 - (s-1)*(0.50-0.18)/9; } // ~0.50 → ~0.18
+  sensEl.addEventListener("input", ()=>{ prefs.sens=+sensEl.value; savePrefs(); });
 
-  function positionThr(){
-    // meter max is scaled to ~6 m/s^2
-    const pct = Math.min(100, (highThreshold()/6)*100);
-    thrLine.style.left = pct + "%";
-  }
-  positionThr();
-  sensEl.addEventListener("input", ()=>{ prefs.sens=+sensEl.value; savePrefs(); positionThr(); });
-
-  // ---------- rep detector ----------
-  // Uses linear acceleration magnitude (gravity removed). One "burst" past the
-  // high threshold that then settles below the low threshold = one rep.
-  let smoothed=0, repState="idle", lastRep=0;
+  // ---------- orientation recorder + live plot ----------
+  // We record the angle (degrees) between the phone's orientation at the START of
+  // the set and its current orientation, on every motion event (~30–60 Hz).
+  // Gravity direction (low-passed accelerometer) is a drift-free reference, so
+  // each push-up shows up as one clean bump in that wave.
+  let samples=[];                       // {t, a} for the current set
+  let g0=null, gravInit=false;          // start orientation + warmup flag
   const grav={x:0,y:0,z:0};
+  let liveMax=0, liveState="top", liveLastRep=0, rafPending=false;
+
+  function fitCanvas(){
+    const r=cv.getBoundingClientRect(); const dpr=window.devicePixelRatio||1;
+    cv.width=Math.round(r.width*dpr); cv.height=Math.round(r.height*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
 
   function onMotion(e){
-    const ag = e.accelerationIncludingGravity;
-    let lin = e.acceleration;
-    // Fallback: estimate linear accel by removing a low-passed gravity estimate
-    if(!lin || (lin.x==null && lin.y==null && lin.z==null)){
-      if(!ag) return;
-      const a=0.85;
-      grav.x=a*grav.x+(1-a)*(ag.x||0);
-      grav.y=a*grav.y+(1-a)*(ag.y||0);
-      grav.z=a*grav.z+(1-a)*(ag.z||0);
-      lin={x:(ag.x||0)-grav.x, y:(ag.y||0)-grav.y, z:(ag.z||0)-grav.z};
-    }
-    const mag=Math.sqrt((lin.x||0)**2+(lin.y||0)**2+(lin.z||0)**2);
-    smoothed = smoothed*0.7 + mag*0.3;
-
-    // live meter (always, even when idle, so user can tune)
-    barEl.style.width = Math.min(100,(smoothed/6)*100) + "%";
-
+    const ag=e.accelerationIncludingGravity; if(!ag) return;
+    if(!gravInit){ grav.x=ag.x||0; grav.y=ag.y||0; grav.z=ag.z||0; gravInit=true; }
+    else { const k=0.8; grav.x=k*grav.x+(1-k)*(ag.x||0); grav.y=k*grav.y+(1-k)*(ag.y||0); grav.z=k*grav.z+(1-k)*(ag.z||0); }
     if(!active) return;
-    const now = e.timeStamp || performance.now();
-    const hi=highThreshold(), lo=lowThreshold();
-    if(repState==="idle" && smoothed>hi && (now-lastRep)>450){
-      repState="armed";
-    } else if(repState==="armed" && smoothed<lo){
-      repState="idle"; lastRep=now; addRep(1, true);
+    const gm=Math.hypot(grav.x,grav.y,grav.z)||1;
+    const g={x:grav.x/gm, y:grav.y/gm, z:grav.z/gm};
+    if(!g0){ g0=g; return; }             // capture the starting orientation
+    let dot=g.x*g0.x+g.y*g0.y+g.z*g0.z; dot=Math.max(-1,Math.min(1,dot));
+    const angle=Math.acos(dot)*180/Math.PI;
+    const now=e.timeStamp||performance.now();
+    samples.push({t:now, a:angle});
+    angleEl.textContent=Math.round(angle)+"°";
+    liveCount(angle, now);
+    scheduleDraw();
+  }
+
+  // rough live count for feedback; the authoritative count is computed at finish()
+  function liveCount(angle, now){
+    liveMax=Math.max(angle, liveMax*0.995);
+    if(liveMax<MIN_AMP) return;
+    const hi=liveMax*0.55, lo=liveMax*0.30;
+    if(liveState==="top" && angle>hi && (now-liveLastRep)>400){ liveState="down"; }
+    else if(liveState==="down" && angle<lo){ liveState="top"; liveLastRep=now; addRep(1,true); }
+  }
+
+  function scheduleDraw(){
+    if(rafPending) return; rafPending=true;
+    requestAnimationFrame(()=>{ rafPending=false; drawWave(samples,null); });
+  }
+
+  const WINDOW_MS=12000;                 // live view shows the last 12 s
+  function drawWave(data, peaks){
+    const w=cv.clientWidth||cv.width, h=cv.clientHeight||cv.height;
+    ctx.clearRect(0,0,w,h);
+    if(!data.length) return;
+    const tEnd=data[data.length-1].t;
+    const tStart = active ? Math.max(data[0].t, tEnd-WINDOW_MS) : data[0].t;
+    let maxA=15; for(const p of data){ if(p.t>=tStart && p.a>maxA) maxA=p.a; }
+    maxA*=1.12;
+    const span=Math.max(1,tEnd-tStart);
+    const X=t=>((t-tStart)/span)*(w-8)+4;
+    const Y=a=>h-8-(a/maxA)*(h-18);
+    ctx.strokeStyle="#27314f"; ctx.lineWidth=1;             // 0° baseline
+    ctx.beginPath(); ctx.moveTo(0,Y(0)+.5); ctx.lineTo(w,Y(0)+.5); ctx.stroke();
+    ctx.strokeStyle="#4f8cff"; ctx.lineWidth=2; ctx.lineJoin="round"; ctx.beginPath();
+    let started=false;
+    for(const p of data){ if(p.t<tStart) continue; const x=X(p.t),y=Y(p.a);
+      if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
+    ctx.stroke();
+    if(peaks && peaks.length){                              // counted reps
+      ctx.fillStyle="#36d399";
+      for(const i of peaks){ const p=data[i]; ctx.beginPath(); ctx.arc(X(p.t),Y(p.a),4,0,Math.PI*2); ctx.fill(); }
     }
+  }
+
+  // ---------- rep math: find the repetition in the recorded wave ----------
+  function movavg(x,w){
+    if(w<=1) return x.slice();
+    const n=x.length, half=(w>>1), pre=new Array(n+1); pre[0]=0;
+    for(let i=0;i<n;i++) pre[i+1]=pre[i]+x[i];
+    const out=new Array(n);
+    for(let i=0;i<n;i++){ const a=Math.max(0,i-half), b=Math.min(n,i+half+1); out[i]=(pre[b]-pre[a])/(b-a); }
+    return out;
+  }
+  function findPeaks(x, minDist, thresh){
+    const n=x.length, cand=[];
+    for(let i=1;i<n-1;i++){ if(x[i]>=x[i-1] && x[i]>x[i+1] && x[i]>=thresh) cand.push(i); }
+    cand.sort((a,b)=>x[b]-x[a]);          // tallest first
+    const chosen=[];
+    for(const i of cand){ let ok=true; for(const j of chosen){ if(Math.abs(i-j)<minDist){ok=false;break;} } if(ok) chosen.push(i); }
+    chosen.sort((a,b)=>a-b);
+    return chosen;
+  }
+  function analyze(data){
+    const N=data.length;
+    if(N<8) return {reps:0, peaks:[], reason:"set too short"};
+    const durS=(data[N-1].t-data[0].t)/1000;
+    const fs=(N-1)/Math.max(.001,durS);   // effective sample rate
+    const s=movavg(data.map(p=>p.a), Math.max(1,Math.round(fs*0.12)));
+    let mn=Infinity,mx=-Infinity,sum=0;
+    for(const v of s){ if(v<mn)mn=v; if(v>mx)mx=v; sum+=v; }
+    const amp=mx-mn, mean=sum/N;
+    if(amp<MIN_AMP) return {reps:0, peaks:[], amp, durS, fs, reason:"motion too small"};
+    // --- autocorrelation: find the dominant period (the repetition) ---
+    const d=s.map(v=>v-mean);
+    const minLag=Math.max(2,Math.round(fs*0.5));             // fastest ~2 reps/sec
+    const maxLag=Math.min(Math.round(fs*6), Math.floor(N/2));// slowest ~1 rep/6s
+    let denom=0; for(const v of d) denom+=v*v; denom=denom||1;
+    let bestLag=-1,bestR=-Infinity;
+    for(let lag=minLag; lag<=maxLag; lag++){
+      let acc=0; for(let i=0;i+lag<N;i++) acc+=d[i]*d[i+lag];
+      const r=acc/denom; if(r>bestR){ bestR=r; bestLag=lag; }
+    }
+    const period = bestLag>0 ? bestLag/fs : null;            // seconds per rep
+    // --- count bumps, spaced ~one period apart, tall enough per sensitivity ---
+    const minDist = bestLag>0 ? Math.round(bestLag*0.6) : Math.round(fs*0.45);
+    const peaks = findPeaks(s, minDist, mn+amp*promFrac());
+    const repsPeaks = peaks.length;
+    const repsPeriod = period ? Math.round(durS/period) : repsPeaks;
+    // prefer the direct bump count; if periodicity is strong but disagrees, blend
+    let reps = repsPeaks;
+    if(bestR>0.5 && Math.abs(repsPeriod-repsPeaks)>1) reps = Math.round((repsPeaks+repsPeriod)/2);
+    return {reps, repsPeaks, repsPeriod, period, bestR, amp, durS, fs, peaks};
   }
 
   // ---------- counting ----------
@@ -258,10 +334,12 @@
     try{ audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)(); audioCtx.resume(); }catch(e){}
     await acquireLock();
 
-    active=true; count=0; setStart=Date.now(); repState="idle"; render();
+    active=true; count=0; setStart=Date.now(); render();
+    samples=[]; g0=null; gravInit=false; liveMax=0; liveState="top"; liveLastRep=0;
+    angleEl.textContent="0°"; fitCanvas(); drawWave(samples,null);
     startBtn.classList.add("hide"); stopBtn.classList.remove("hide");
     liveDot.classList.add("on");
-    subEl.textContent="Counting… do your push-ups";
+    subEl.textContent="Recording… do your push-ups, then tap Finish set";
   }
 
   function finish(){
@@ -270,13 +348,17 @@
     startBtn.classList.remove("hide"); stopBtn.classList.add("hide");
     if(wakeLock){ try{wakeLock.release();}catch(e){} wakeLock=null; }
     reflectLock();
+    const res=analyze(samples);
+    drawWave(samples, res.peaks||null);   // redraw whole set with counted reps marked
+    count=res.reps||0; render();
     if(count>0){
       const dur=Math.round((Date.now()-setStart)/1000);
+      const cad=res.period?Math.round(60/res.period):null;
       sessions.unshift({id:setStart, ts:setStart, reps:count, dur});
       save(sessions); renderStats(); renderHistory();
-      subEl.textContent="Saved "+count+" reps. Nice. Press Start for another set.";
+      subEl.textContent="Detected "+count+" reps"+(cad?(" · ~"+cad+"/min"):"")+". Green dots = counted reps. Saved.";
     } else {
-      subEl.textContent="No reps detected. Try raising sensitivity.";
+      subEl.textContent="Couldn't find clear reps ("+(res.reason||"low signal")+"). Raise sensitivity or check phone placement.";
     }
   }
 
@@ -344,6 +426,7 @@
   if(!window.isSecureContext){ $("secureWarn").style.display="block"; }
 
   renderStats(); renderHistory(); reflectLock();
+  fitCanvas(); window.addEventListener("resize", ()=>{ fitCanvas(); drawWave(samples,null); });
 
   // register service worker for offline / install
   if("serviceWorker" in navigator){
