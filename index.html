@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>PushCount</title>
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#0b1020" />
+<!-- iOS add-to-home-screen -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="PushCount" />
+<link rel="apple-touch-icon" href="./icon.svg" />
+<link rel="icon" href="./icon.svg" />
+<style>
+  :root{
+    --bg:#0b1020; --panel:#151b2e; --panel2:#1d2640; --txt:#eaf0ff;
+    --muted:#8b96b8; --accent:#4f8cff; --good:#36d399; --bad:#ff6b6b;
+    --line:#27314f;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  body{padding:max(14px,env(safe-area-inset-top)) 14px max(20px,env(safe-area-inset-bottom));
+    max-width:520px;margin:0 auto;}
+  h1{font-size:20px;margin:4px 0 14px;letter-spacing:.3px;display:flex;align-items:center;gap:8px;}
+  h1 .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);transition:.2s;}
+  h1 .dot.on{background:var(--good);box-shadow:0 0 10px var(--good);}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;
+    padding:18px;margin-bottom:14px;}
+  .count{font-size:96px;font-weight:800;text-align:center;line-height:1;
+    font-variant-numeric:tabular-nums;margin:6px 0 2px;}
+  .count.flash{animation:pop .18s ease;}
+  @keyframes pop{0%{transform:scale(1)}40%{transform:scale(1.12)}100%{transform:scale(1)}}
+  .sub{text-align:center;color:var(--muted);font-size:14px;margin-bottom:14px;}
+  .row{display:flex;gap:10px;}
+  button{font:inherit;color:var(--txt);background:var(--panel2);border:1px solid var(--line);
+    border-radius:14px;padding:16px;font-size:17px;font-weight:600;flex:1;cursor:pointer;
+    touch-action:manipulation;transition:transform .05s, background .15s;}
+  button:active{transform:scale(.97);}
+  button.primary{background:var(--accent);border-color:var(--accent);}
+  button.danger{background:var(--bad);border-color:var(--bad);}
+  button.ghost{background:transparent;}
+  button:disabled{opacity:.4;}
+  .mini{padding:12px;font-size:22px;flex:0 0 64px;}
+  label{display:block;color:var(--muted);font-size:13px;margin:2px 0 8px;}
+  input[type=range]{width:100%;accent-color:var(--accent);height:34px;}
+  .meter{height:18px;border-radius:9px;background:var(--panel2);overflow:hidden;position:relative;margin-top:10px;border:1px solid var(--line);}
+  .meter .bar{height:100%;width:0%;background:linear-gradient(90deg,#3a6,#4f8cff);transition:width .05s linear;}
+  .meter .thr{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bad);}
+  .stats{display:flex;gap:10px;}
+  .stat{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:12px;text-align:center;}
+  .stat .n{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-top:2px;}
+  .hist{list-style:none;padding:0;margin:0;}
+  .hist li{display:flex;align-items:center;justify-content:space-between;padding:11px 4px;border-bottom:1px solid var(--line);}
+  .hist li:last-child{border-bottom:none;}
+  .hist .reps{font-weight:800;font-size:18px;font-variant-numeric:tabular-nums;min-width:42px;}
+  .hist .meta{color:var(--muted);font-size:13px;flex:1;margin-left:12px;}
+  .hist .del{flex:0 0 auto;background:transparent;border:none;color:var(--muted);font-size:18px;padding:6px 10px;width:auto;}
+  .note{color:var(--muted);font-size:12.5px;line-height:1.5;}
+  .banner{background:#3a2030;border:1px solid var(--bad);color:#ffd9d9;border-radius:14px;padding:12px;font-size:13.5px;margin-bottom:14px;display:none;}
+  .hide{display:none !important;}
+  .secTitle{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:0 2px 10px;}
+</style>
+</head>
+<body>
+
+<h1><span id="liveDot" class="dot"></span> PushCount</h1>
+
+<div id="secureWarn" class="banner">
+  ⚠️ Motion sensors need an <b>https://</b> page. You appear to be on an insecure URL, so auto-count won’t work. Manual counting still works.
+</div>
+
+<!-- COUNTER -->
+<div class="card">
+  <div id="count" class="count">0</div>
+  <div id="sub" class="sub">Press Start, then do push-ups</div>
+  <div class="row" style="margin-bottom:10px">
+    <button id="startBtn" class="primary">Start</button>
+    <button id="stopBtn" class="danger hide">Finish set</button>
+  </div>
+  <div class="row">
+    <button id="minus" class="ghost mini">−</button>
+    <button id="plus" class="ghost mini">+</button>
+    <button id="reset" class="ghost">Reset</button>
+  </div>
+</div>
+
+<!-- SENSITIVITY -->
+<div class="card">
+  <div class="secTitle">Detection</div>
+  <label>Sensitivity — higher = counts smaller motions (raise if it misses reps, lower if it over-counts)</label>
+  <input id="sens" type="range" min="1" max="10" step="1" value="6" />
+  <div class="meter" id="meterWrap">
+    <div class="bar" id="bar"></div>
+    <div class="thr" id="thrLine"></div>
+  </div>
+  <p class="note" style="margin:10px 0 0">
+    Blue = current motion, red line = trigger level. Strap the phone to your upper arm or tuck it in your waistband, then tune so resting stays left of the line and each push-up spikes across it.
+  </p>
+</div>
+
+<!-- STATS -->
+<div class="card">
+  <div class="stats">
+    <div class="stat"><div id="todayN" class="n">0</div><div class="l">Today</div></div>
+    <div class="stat"><div id="weekN" class="n">0</div><div class="l">7 days</div></div>
+    <div class="stat"><div id="allN" class="n">0</div><div class="l">All time</div></div>
+  </div>
+</div>
+
+<!-- HISTORY -->
+<div class="card">
+  <div class="secTitle" style="display:flex;justify-content:space-between;align-items:center">
+    <span>History</span>
+    <button id="clearAll" class="ghost" style="width:auto;padding:6px 12px;font-size:12px;font-weight:600">Clear all</button>
+  </div>
+  <ul id="hist" class="hist"></ul>
+  <p id="histEmpty" class="note">No sets yet. Your finished sets show up here.</p>
+</div>
+
+<p class="note" style="text-align:center;margin-top:18px">All data stays on this device (browser storage). Nothing is uploaded.</p>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- storage ----------
+  const KEY = "pushcount.sessions.v1";
+  const PREF = "pushcount.prefs.v1";
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch(e){ return []; } };
+  const save = (a) => localStorage.setItem(KEY, JSON.stringify(a));
+  let sessions = load();
+  let prefs = (()=>{ try { return JSON.parse(localStorage.getItem(PREF)) || {}; } catch(e){ return {}; } })();
+  const savePrefs = () => localStorage.setItem(PREF, JSON.stringify(prefs));
+
+  // ---------- elements ----------
+  const $ = id => document.getElementById(id);
+  const countEl=$("count"), subEl=$("sub"), startBtn=$("startBtn"), stopBtn=$("stopBtn");
+  const sensEl=$("sens"), barEl=$("bar"), thrLine=$("thrLine"), meterWrap=$("meterWrap");
+  const liveDot=$("liveDot");
+
+  // ---------- state ----------
+  let active=false, count=0, setStart=0, wakeLock=null, audioCtx=null;
+
+  if (prefs.sens) sensEl.value = prefs.sens;
+
+  // sensitivity 1..10 -> high threshold in m/s^2 (10 = most sensitive = low threshold)
+  function highThreshold(){
+    const s = +sensEl.value;            // 1..10
+    return 3.8 - (s-1)*(3.8-0.55)/9;    // ~3.8 down to ~0.55
+  }
+  function lowThreshold(){ return highThreshold()*0.45; }
+
+  function positionThr(){
+    // meter max is scaled to ~6 m/s^2
+    const pct = Math.min(100, (highThreshold()/6)*100);
+    thrLine.style.left = pct + "%";
+  }
+  positionThr();
+  sensEl.addEventListener("input", ()=>{ prefs.sens=+sensEl.value; savePrefs(); positionThr(); });
+
+  // ---------- rep detector ----------
+  // Uses linear acceleration magnitude (gravity removed). One "burst" past the
+  // high threshold that then settles below the low threshold = one rep.
+  let smoothed=0, repState="idle", lastRep=0;
+  const grav={x:0,y:0,z:0};
+
+  function onMotion(e){
+    const ag = e.accelerationIncludingGravity;
+    let lin = e.acceleration;
+    // Fallback: estimate linear accel by removing a low-passed gravity estimate
+    if(!lin || (lin.x==null && lin.y==null && lin.z==null)){
+      if(!ag) return;
+      const a=0.85;
+      grav.x=a*grav.x+(1-a)*(ag.x||0);
+      grav.y=a*grav.y+(1-a)*(ag.y||0);
+      grav.z=a*grav.z+(1-a)*(ag.z||0);
+      lin={x:(ag.x||0)-grav.x, y:(ag.y||0)-grav.y, z:(ag.z||0)-grav.z};
+    }
+    const mag=Math.sqrt((lin.x||0)**2+(lin.y||0)**2+(lin.z||0)**2);
+    smoothed = smoothed*0.7 + mag*0.3;
+
+    // live meter (always, even when idle, so user can tune)
+    barEl.style.width = Math.min(100,(smoothed/6)*100) + "%";
+
+    if(!active) return;
+    const now = e.timeStamp || performance.now();
+    const hi=highThreshold(), lo=lowThreshold();
+    if(repState==="idle" && smoothed>hi && (now-lastRep)>450){
+      repState="armed";
+    } else if(repState==="armed" && smoothed<lo){
+      repState="idle"; lastRep=now; addRep(1, true);
+    }
+  }
+
+  // ---------- counting ----------
+  function render(){
+    countEl.textContent=count;
+    countEl.classList.remove("flash"); void countEl.offsetWidth; countEl.classList.add("flash");
+  }
+  function addRep(n, beep){
+    count=Math.max(0,count+n); render();
+    if(beep) chirp();
+  }
+
+  // ---------- audio feedback (vibration unsupported in iOS Safari) ----------
+  function chirp(){
+    try{
+      if(!audioCtx) return;
+      const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+      o.frequency.value=880; o.type="sine";
+      g.gain.setValueAtTime(0.001,audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.25,audioCtx.currentTime+0.01);
+      g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.12);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime+0.13);
+    }catch(e){}
+  }
+
+  // ---------- session control ----------
+  async function start(){
+    // iOS 13+ permission gate (must be inside the tap)
+    if(typeof DeviceMotionEvent!=="undefined" && typeof DeviceMotionEvent.requestPermission==="function"){
+      try{
+        const res=await DeviceMotionEvent.requestPermission();
+        if(res!=="granted"){ subEl.textContent="Motion permission denied — use +/− to count manually."; }
+      }catch(err){ subEl.textContent="Couldn't enable motion sensor — counting manually."; }
+    }
+    try{ audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)(); audioCtx.resume(); }catch(e){}
+    try{ if("wakeLock" in navigator){ wakeLock=await navigator.wakeLock.request("screen"); } }catch(e){}
+
+    active=true; count=0; setStart=Date.now(); repState="idle"; render();
+    startBtn.classList.add("hide"); stopBtn.classList.remove("hide");
+    liveDot.classList.add("on");
+    subEl.textContent="Counting… do your push-ups";
+  }
+
+  function finish(){
+    active=false;
+    liveDot.classList.remove("on");
+    startBtn.classList.remove("hide"); stopBtn.classList.add("hide");
+    if(wakeLock){ try{wakeLock.release();}catch(e){} wakeLock=null; }
+    if(count>0){
+      const dur=Math.round((Date.now()-setStart)/1000);
+      sessions.unshift({id:setStart, ts:setStart, reps:count, dur});
+      save(sessions); renderStats(); renderHistory();
+      subEl.textContent="Saved "+count+" reps. Nice. Press Start for another set.";
+    } else {
+      subEl.textContent="No reps detected. Try raising sensitivity.";
+    }
+  }
+
+  // re-acquire wake lock when returning to the app
+  document.addEventListener("visibilitychange", async ()=>{
+    if(document.visibilityState==="visible" && active && "wakeLock" in navigator && !wakeLock){
+      try{ wakeLock=await navigator.wakeLock.request("screen"); }catch(e){}
+    }
+  });
+
+  // ---------- stats + history ----------
+  function startOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x.getTime(); }
+  function renderStats(){
+    const today=startOfDay(Date.now());
+    const weekAgo=today-6*86400000;
+    let t=0,w=0,all=0;
+    for(const s of sessions){
+      all+=s.reps;
+      if(s.ts>=today) t+=s.reps;
+      if(s.ts>=weekAgo) w+=s.reps;
+    }
+    $("todayN").textContent=t; $("weekN").textContent=w; $("allN").textContent=all;
+  }
+  function fmt(ts){
+    const d=new Date(ts), now=new Date();
+    const sameDay=startOfDay(ts)===startOfDay(now.getTime());
+    const yest=startOfDay(ts)===startOfDay(now.getTime())-86400000;
+    const time=d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
+    if(sameDay) return "Today "+time;
+    if(yest) return "Yesterday "+time;
+    return d.toLocaleDateString([], {month:"short", day:"numeric"})+" "+time;
+  }
+  function renderHistory(){
+    const ul=$("hist"); ul.innerHTML="";
+    $("histEmpty").style.display = sessions.length? "none":"block";
+    for(const s of sessions.slice(0,40)){
+      const li=document.createElement("li");
+      const dur = s.dur? (s.dur<60? s.dur+"s" : Math.round(s.dur/60)+"m") : "";
+      li.innerHTML='<span class="reps">'+s.reps+'</span>'+
+        '<span class="meta">'+fmt(s.ts)+(dur?' · '+dur:'')+'</span>'+
+        '<button class="del" data-id="'+s.id+'" aria-label="Delete">✕</button>';
+      ul.appendChild(li);
+    }
+    ul.querySelectorAll(".del").forEach(b=>b.addEventListener("click",()=>{
+      const id=+b.getAttribute("data-id");
+      sessions=sessions.filter(s=>s.id!==id); save(sessions); renderStats(); renderHistory();
+    }));
+  }
+
+  // ---------- wiring ----------
+  startBtn.addEventListener("click", start);
+  stopBtn.addEventListener("click", finish);
+  $("plus").addEventListener("click", ()=>addRep(1,false));
+  $("minus").addEventListener("click", ()=>addRep(-1,false));
+  $("reset").addEventListener("click", ()=>{ count=0; render(); });
+  $("clearAll").addEventListener("click", ()=>{
+    if(confirm("Delete all saved sets? This cannot be undone.")){
+      sessions=[]; save(sessions); renderStats(); renderHistory();
+    }
+  });
+
+  window.addEventListener("devicemotion", onMotion);
+
+  // secure-context warning (motion needs https; localhost is fine)
+  if(!window.isSecureContext){ $("secureWarn").style.display="block"; }
+
+  renderStats(); renderHistory();
+
+  // register service worker for offline / install
+  if("serviceWorker" in navigator){
+    navigator.serviceWorker.register("./sw.js").catch(()=>{});
+  }
+})();
+</script>
+</body>
+</html>
