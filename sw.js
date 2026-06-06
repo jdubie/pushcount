@@ -1,4 +1,4 @@
-const CACHE = "pushcount-v1";
+const CACHE = "pushcount-v2";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (e) => {
